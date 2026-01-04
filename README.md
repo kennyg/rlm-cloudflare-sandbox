@@ -1,38 +1,81 @@
 # RLM Cloudflare Sandbox
 
-Cloudflare Worker that provides a sandbox environment for [RLM (Recursive Language Models)](https://github.com/alexzhang13/rlm).
+Cloudflare Worker that provides isolated Python execution environments for [RLM (Recursive Language Models)](https://github.com/alexzhang13/rlm).
 
-## Overview
+## Features
 
-This Worker implements the RLM sandbox API contract, allowing Python code execution in isolated Cloudflare Sandbox containers with LLM callback support.
+- **Isolated Python Execution** - Run Python code in secure Cloudflare Sandbox containers
+- **State Persistence** - Variables persist between executions within a session
+- **LLM Callbacks** - `llm_query()` and `llm_query_batched()` functions available in sandbox code
+- **FINAL_VAR Helper** - Extract variable values by name
+- **API Key Authentication** - Optional bearer token auth for production
+
+## Requirements
+
+- Node.js 18+
+- [Cloudflare account](https://dash.cloudflare.com/sign-up) with Workers Paid plan (for Containers)
+- Docker or OrbStack (for local development)
+
+## Local Development
+
+```bash
+# Install dependencies
+npm install
+
+# Start local dev server (requires Docker running)
+npm run dev
+```
+
+The worker will be available at `http://localhost:8787`.
+
+### Test with curl
+
+```bash
+# Health check
+curl http://localhost:8787/health
+
+# Create session and execute code
+curl -X POST http://localhost:8787/execute \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "test", "code": "x = 42\nprint(x)"}'
+
+# Variables persist across executions
+curl -X POST http://localhost:8787/execute \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "test", "code": "print(x * 2)"}'
+```
+
+## Deployment
+
+```bash
+# Login to Cloudflare
+npx wrangler login
+
+# Deploy
+npx wrangler deploy
+
+# Set API key for authentication (recommended for production)
+npx wrangler secret put API_KEY
+```
 
 ## API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/session` | POST | Create/get a sandbox session |
-| `/execute` | POST | Execute Python code |
-| `/context` | POST | Load context data into sandbox |
-| `/pending` | GET | Get pending LLM requests |
-| `/respond` | POST | Submit LLM response |
-| `/session` | DELETE | Cleanup sandbox session |
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check (no auth required) |
+| POST | `/session` | Create or retrieve a session |
+| POST | `/execute` | Execute Python code |
+| POST | `/context` | Load context data into session |
+| GET | `/pending` | Get pending LLM requests (for client polling) |
+| POST | `/respond` | Submit LLM response |
+| DELETE | `/session` | Delete a session |
 
-## Setup
+### Authentication
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-2. Run locally:
-   ```bash
-   npm run dev
-   ```
-
-3. Deploy to Cloudflare:
-   ```bash
-   npm run deploy
-   ```
+If `API_KEY` secret is set, all endpoints (except `/health`) require:
+```
+Authorization: Bearer <your-api-key>
+```
 
 ## Usage with RLM
 
@@ -40,107 +83,83 @@ This Worker implements the RLM sandbox API contract, allowing Python code execut
 from rlm import RLM
 
 rlm = RLM(
-    backend="openai",
-    backend_kwargs={"model_name": "gpt-4"},
-    environment="cloudflare",
+    backend='openai',
+    backend_kwargs={'model_name': 'gpt-4o-mini'},
+    environment='cloudflare',
     environment_kwargs={
-        "worker_url": "https://rlm-sandbox.your-account.workers.dev",
+        'worker_url': 'https://rlm-sandbox.your-account.workers.dev',
+        'api_key': 'your-api-key',  # if API_KEY secret is set
     },
 )
 
-result = rlm.completion("Calculate 2+2 using Python")
+result = rlm.completion('Calculate the square root of 144 using Python.')
+print(result.response)
 ```
 
-## API Details
+### Direct CloudflareREPL Usage
 
-### POST /session
-```json
-// Request
-{ "session_id": "optional-custom-id" }
+```python
+from rlm.environments.cloudflare_repl import CloudflareREPL
 
-// Response
-{ "session_id": "abc123", "status": "ready" }
+repl = CloudflareREPL(
+    worker_url='http://localhost:8787',  # or deployed URL
+    api_key='your-api-key',  # optional
+)
+
+# Execute code
+result = repl.execute_code('x = 10\nprint(x)')
+print(result.stdout)  # "10\n"
+
+# State persists
+result = repl.execute_code('print(x * 2)')
+print(result.stdout)  # "20\n"
+
+# Load context
+repl.load_context({'data': [1, 2, 3]})
+result = repl.execute_code('print(sum(context["data"]))')
+print(result.stdout)  # "6\n"
+
+# Cleanup
+repl.cleanup()
 ```
 
-### POST /execute
-```json
-// Request
-{ "session_id": "abc123", "code": "print('hello')" }
+## Sandbox Features
 
-// Response
-{
-  "stdout": "hello\n",
-  "stderr": "",
-  "locals": { "x": "1" },
-  "execution_time": 0.05
-}
-```
+Code executed in the sandbox has access to:
 
-### POST /context
-```json
-// Request
-{ "session_id": "abc123", "context": "your context data" }
+- **`llm_query(prompt, model=None)`** - Query the LLM and get a response
+- **`llm_query_batched(prompts, model=None)`** - Query with multiple prompts
+- **`FINAL_VAR(variable_name)`** - Get a variable's string value by name
+- **Pre-installed packages** - numpy, pandas (in `-python` image)
 
-// Response
-{ "status": "ok" }
-```
+### Installing Packages at Runtime
 
-### GET /pending?session_id=abc123
-```json
-// Response
-{
-  "pending": [
-    {
-      "id": "req1",
-      "request": { "type": "single", "prompt": "...", "model": null }
-    }
-  ]
-}
-```
-
-### POST /respond
-```json
-// Request
-{
-  "session_id": "abc123",
-  "id": "req1",
-  "response": { "response": "LLM response here" }
-}
-
-// Response
-{ "status": "ok" }
-```
-
-### DELETE /session
-```json
-// Request
-{ "session_id": "abc123" }
-
-// Response
-{ "status": "deleted" }
+```python
+repl.execute_code('''
+import os
+os.system("curl -LsSf https://astral.sh/uv/install.sh | sh")
+os.system("/root/.local/bin/uv pip install requests --system")
+import requests
+print(requests.__version__)
+''')
 ```
 
 ## Architecture
 
 ```
-Python (CloudflareREPL)              This Worker
-├── Creates session         ──────►  POST /session
-├── Sends code to execute   ──────►  POST /execute
-│                                    │
-│   ┌────────────────────────────────┘
-│   │  Sandbox Container
-│   │  ├── Executes Python code
-│   │  ├── llm_query() calls enqueue to /internal/enqueue
-│   │  └── Polls /internal/result for response
-│   │
-├── Polls for LLM requests  ──────►  GET /pending
-├── Handles LLM via handler
-└── Posts LLM responses     ──────►  POST /respond
+┌─────────────────────┐     HTTP      ┌─────────────────────────────┐
+│  CloudflareREPL     │◄────────────►│  Cloudflare Worker          │
+│  (Python Client)    │               │                             │
+│                     │               │  ┌───────────────────────┐  │
+│  - execute_code()   │               │  │  Sandbox Container    │  │
+│  - load_context()   │               │  │  (Python 3.11)        │  │
+│  - polls /pending   │               │  │                       │  │
+│  - responds to LLM  │               │  │  - exec user code     │  │
+│                     │               │  │  - state persistence  │  │
+└─────────────────────┘               │  │  - llm_query()        │  │
+                                      │  └───────────────────────┘  │
+                                      └─────────────────────────────┘
 ```
-
-## Development
-
-The Worker uses in-memory storage for the LLM request queue. In production, consider using Durable Object storage for persistence.
 
 ## License
 
