@@ -16,6 +16,7 @@ export { Sandbox } from "@cloudflare/sandbox";
 
 interface Env {
   Sandbox: DurableObjectNamespace;
+  API_KEY?: string; // Optional: set via wrangler secret
 }
 
 interface LLMRequest {
@@ -238,11 +239,25 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    try {
-      // Health check
-      if (path === "/" || path === "/health") {
-        return Response.json({ status: "ok" }, { headers: corsHeaders });
+    // Health check (no auth required)
+    if (path === "/" || path === "/health") {
+      return Response.json({ status: "ok" }, { headers: corsHeaders });
+    }
+
+    // API key authentication (if API_KEY is configured)
+    if (env.API_KEY) {
+      const authHeader = request.headers.get("Authorization");
+      const providedKey = authHeader?.replace("Bearer ", "");
+
+      if (providedKey !== env.API_KEY) {
+        return Response.json(
+          { error: "Unauthorized" },
+          { status: 401, headers: corsHeaders }
+        );
       }
+    }
+
+    try {
 
       // Create session
       if (method === "POST" && path === "/session") {
